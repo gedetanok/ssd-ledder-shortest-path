@@ -438,7 +438,7 @@ class RadioLabelingUI:
             self._on_pick(fake)
         self.fig.canvas.draw_idle()
 
-    def _solve_ilp(self, time_limit=300):
+    def _solve_ilp(self):
         """Solve radio labeling exactly with PuLP/CBC.
 
         Variables:
@@ -518,7 +518,7 @@ class RadioLabelingUI:
             y_var.setInitialValue(1 if g_labels[u] >= g_labels[v] else 0)
         S.setInitialValue(int(g_span))
 
-        solver = pulp.PULP_CBC_CMD(msg=True, timeLimit=time_limit, warmStart=True)
+        solver = pulp.PULP_CBC_CMD(msg=True, warmStart=True)
         prob.solve(solver)
 
         status = pulp.LpStatus[prob.status]
@@ -529,16 +529,15 @@ class RadioLabelingUI:
         labels = {v: x - lo for v, x in labels.items()}
         span -= lo
 
-        # Safety: if CBC's incumbent is worse than greedy (e.g. due to
-        # time-out with weak warm-start), fall back to the greedy labeling
-        # which is guaranteed valid.
+        # Safety: if CBC's incumbent is worse than greedy, fall back to the
+        # greedy labeling which is guaranteed valid.
         if span > g_span:
             print(f"  ILP best ({span}) worse than greedy ({g_span}); "
                   f"using greedy.", flush=True)
             g_lo = min(g_labels.values())
             labels = {v: x - g_lo for v, x in g_labels.items()}
             span = g_span - g_lo
-            status = "TimeLimit-UsedGreedy"
+            status = "UsedGreedy"
 
         ordering = sorted(nodes, key=lambda v: (labels[v], v))
         return ordering, labels, span, status
