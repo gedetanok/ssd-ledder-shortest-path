@@ -118,16 +118,28 @@ def build_ssd_prism(k: int, m: int, n: int):
     G = nx.Graph()
     pos, role = {}, {}
 
-    R = 2.4
-    SKEW_X = 1.15
-    H = 2.7
     STEP = 0.42
-    theta0 = math.pi / 2 + math.pi / m
 
-    def layer_xy(c, i):
-        ang = theta0 + 2 * math.pi * (c - 1) / m
-        return (R * math.cos(ang) + (i - 1) * SKEW_X,
-                R * math.sin(ang) + (i - 1) * H)
+    if m == 3:
+        # Flat vertical-stacked triangles (matches the SSD_k(D_{3,n}) figures)
+        R = 2.5
+        V_GAP = 4.2
+        theta0 = math.pi / 2
+
+        def layer_xy(c, i):
+            ang = theta0 + 2 * math.pi * (c - 1) / m
+            return (R * math.cos(ang), -(i - 1) * V_GAP + R * math.sin(ang))
+    else:
+        # Oblique 3-D projection (matches cube / pentagonal-prism figures)
+        R = 2.4
+        SKEW_X = 1.15
+        H = 2.7
+        theta0 = math.pi / 2 + math.pi / m
+
+        def layer_xy(c, i):
+            ang = theta0 + 2 * math.pi * (c - 1) / m
+            return (R * math.cos(ang) + (i - 1) * SKEW_X,
+                    R * math.sin(ang) + (i - 1) * H)
 
     for i in range(1, n + 1):
         for c in range(1, m + 1):
@@ -561,6 +573,23 @@ def greedy_ordering(G):
 # Main
 # ----------------------------------------------------------------------
 
+def _base_diameter(G, role) -> int:
+    """Diameter over ORIGINAL vertices only (thesis convention): the largest
+    shortest-path distance between two non-subdivision vertices (= 2 x diam of
+    the base graph). For prisms with odd m this is one less than nx.diameter(G)
+    because there a subdivision vertex is the eccentric one; the document uses
+    this original-vertex value.
+    """
+    base = [v for v in G if role[v] == "orig"]
+    best = 0
+    for u in base:
+        dist = nx.single_source_shortest_path_length(G, u)
+        for v in base:
+            if dist[v] > best:
+                best = dist[v]
+    return best
+
+
 def make_ladder_spec_cli(k, n):
     G, pos, role = build_ssd_ladder(k, n)
     return {
@@ -569,6 +598,7 @@ def make_ladder_spec_cli(k, n):
         "name_id": f"SSD_{k}(L_{n})",
         "help": HELP_NAMING,
         "list_fn": lambda: list_vertices(k, n),
+        "diam": _base_diameter(G, role),
     }
 
 
@@ -580,6 +610,7 @@ def make_prism_spec_cli(k, m, n):
         "name_id": f"SSD_{k}(D_{m},{n})",
         "help": HELP_NAMING_PRISM,
         "list_fn": lambda: list_vertices_prism(k, m, n),
+        "diam": _base_diameter(G, role),
     }
 
 
@@ -597,8 +628,8 @@ def run_shortest_path(spec):
 
 def run_radio_labeling(spec):
     G, pos, role = spec["G"], spec["pos"], spec["role"]
-    d = nx.diameter(G)
-    print(f"\ndiameter d = {d}")
+    d = spec["diam"]
+    print(f"\ndiameter d = {d}  (jarak terjauh antar titik asli)")
     print(spec["help"])
     spec["list_fn"]()
 

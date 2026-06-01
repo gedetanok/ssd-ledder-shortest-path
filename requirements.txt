@@ -1,0 +1,5 @@
+# Dependency untuk menjalankan tool radio labeling SSD (ladder & prisma)
+# Install:  pip install -r requirements.txt
+matplotlib
+networkx
+pulp

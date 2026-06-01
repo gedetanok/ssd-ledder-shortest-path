@@ -146,17 +146,31 @@ def build_ssd_prism_doc(k: int, m: int, n: int):
     G = nx.Graph()
     pos = {}
 
-    R = 2.4              # polygon (cycle) radius
-    SKEW_X = 1.15        # horizontal depth offset per layer (3-D feel)
-    H = 2.7              # vertical offset per layer
     STEP = 0.42          # fan offset between subdivisions on the same edge
-    theta0 = math.pi / 2 + math.pi / m   # orient polygon with a flat-ish top
 
-    def layer_xy(c, i):
-        ang = theta0 + 2 * math.pi * (c - 1) / m
-        x = R * math.cos(ang) + (i - 1) * SKEW_X
-        y = R * math.sin(ang) + (i - 1) * H
-        return (x, y)
+    if m == 3:
+        # Flat vertical-stacked triangles — matches the SSD_k(D_{3,n}) figures
+        # in the document: triangular "roofs" stacked into a tower (apex up),
+        # layers joined by straight vertical edges.
+        R = 2.5
+        V_GAP = 4.2
+        theta0 = math.pi / 2          # one vertex straight up (apex)
+
+        def layer_xy(c, i):
+            ang = theta0 + 2 * math.pi * (c - 1) / m
+            return (R * math.cos(ang), -(i - 1) * V_GAP + R * math.sin(ang))
+    else:
+        # Oblique 3-D projection — matches the cube (m=4) / pentagonal-prism
+        # (m=5) figures: each layer a regular m-gon offset diagonally.
+        R = 2.4
+        SKEW_X = 1.15
+        H = 2.7
+        theta0 = math.pi / 2 + math.pi / m   # flat-ish top
+
+        def layer_xy(c, i):
+            ang = theta0 + 2 * math.pi * (c - 1) / m
+            return (R * math.cos(ang) + (i - 1) * SKEW_X,
+                    R * math.sin(ang) + (i - 1) * H)
 
     # base vertices
     for i in range(1, n + 1):
@@ -238,7 +252,7 @@ class RadioLabelingUI:
         self.savename = spec["savename"]
         self.sym_groups = [g for g in spec.get("sym_groups", []) if len(g) >= 2]
         self.family = spec.get("family", "ladder")
-        self.diam = nx.diameter(self.G)
+        self.diam = spec["diam"]
         self.delta = self.G.number_of_nodes()
 
         xs = [p[0] for p in self.pos.values()]
@@ -485,6 +499,73 @@ class RadioLabelingUI:
                 best = (span, start, ordering, labels)
         return best[2], best[0], best[1], best[3]
 
+    def _improve_ordering(self, ordering, dist, max_seconds=20.0):
+        """First-improvement local search (insertion moves) over the label
+        ordering. The greedy labeling of ANY ordering is a valid radio
+        labeling, so this can only ever return a result no worse than the
+        input — it never produces an invalid labeling. Deterministic move
+        order; the time cap is only a safety net for very large graphs.
+
+        Scales to large instances where exact ILP is hopeless, and usually
+        reaches the true radio number for these structured graphs.
+        """
+        import time
+        k = self.diam
+        nodes = list(ordering)
+        n = len(nodes)
+        index = {v: a for a, v in enumerate(nodes)}
+        # integer-indexed cost matrix c[i][j] = diam + 1 - d(i, j)
+        c = [[k + 1 - dist[u][w] for w in nodes] for u in nodes]
+        lab = [0] * n
+
+        def span_of(seq):
+            m = 0
+            lab[seq[0]] = 0
+            for j in range(1, n):
+                vj = seq[j]
+                best = 0
+                for i in range(j):
+                    cand = lab[seq[i]] + c[seq[i]][vj]
+                    if cand > best:
+                        best = cand
+                lab[vj] = best
+                if best > m:
+                    m = best
+            return m
+
+        cur = [index[v] for v in nodes]
+        cur_span = span_of(cur)
+        deadline = time.time() + max_seconds
+        improved = True
+        while improved:
+            improved = False
+            for i in range(n):
+                vi = cur[i]
+                rest = cur[:i] + cur[i + 1:]
+                for j in range(n):
+                    if j == i:
+                        continue
+                    trial = rest[:j] + [vi] + rest[j:]
+                    if span_of(trial) < cur_span:
+                        cur = trial
+                        cur_span = span_of(cur)
+                        improved = True
+                        break
+                if improved:
+                    break
+            if time.time() > deadline:
+                break
+
+        span_of(cur)  # refresh lab[] for the final ordering
+        best_order = [nodes[i] for i in cur]
+        labels = {nodes[i]: lab[i] for i in range(n)}
+        return best_order, labels, cur_span
+
+    def _best_heuristic(self, dist, max_seconds=20.0):
+        """Greedy multi-start, then polished with local search."""
+        ordering, _span, _start, _labels = self._compute_best_greedy(dist)
+        return self._improve_ordering(ordering, dist, max_seconds)
+
     # ---- exhaustive branch-and-bound search -----------------------------
 
     def _bf_dfs(self, ordering, labels, current_max, current_set,
@@ -543,9 +624,12 @@ class RadioLabelingUI:
         dist = dict(nx.all_pairs_shortest_path_length(self.G))
         t0 = time.time()
         ordering, span, start, _ = self._compute_best_greedy(dist)
+        print(f"  greedy multi-start : span = {span}  (start {start}, "
+              f"{time.time() - t0:.2f}s)", flush=True)
+        ordering, _labels, span = self._improve_ordering(ordering, dist)
         elapsed = time.time() - t0
-        print(f"  best start = {start}, span = {span}  ({elapsed:.2f}s)")
-        print("  (heuristic: span is a valid upper bound, often = rn)")
+        print(f"  + local search     : span = {span}  (total {elapsed:.2f}s)")
+        print("  (valid upper bound for rn; scales to large graphs)")
         print("=" * 56)
 
         for v in ordering:
@@ -577,10 +661,11 @@ class RadioLabelingUI:
         nodes = list(self.G.nodes)
         dist = dict(nx.all_pairs_shortest_path_length(self.G))
 
-        # Greedy for tight bounds + warm start
-        print("  computing greedy upper bound...", flush=True)
-        g_ord, g_span, g_start, g_labels = self._compute_best_greedy(dist)
-        print(f"  greedy bound: span = {g_span} (start = {g_start})", flush=True)
+        # Heuristic (greedy + local search) for tight bounds + warm start
+        print("  computing heuristic upper bound...", flush=True)
+        g_ord, _g0, _gs, _gl = self._compute_best_greedy(dist)
+        g_ord, g_labels, g_span = self._improve_ordering(g_ord, dist)
+        print(f"  heuristic bound: span = {g_span}", flush=True)
 
         big_M = g_span + k   # tight: any feasible solution satisfies this
 
@@ -629,10 +714,22 @@ class RadioLabelingUI:
             y_var.setInitialValue(1 if g_labels[u] >= g_labels[v] else 0)
         S.setInitialValue(int(g_span))
 
-        solver = pulp.PULP_CBC_CMD(msg=True, warmStart=True)
+        # timeLimit keeps the "Verify" button responsive: CBC returns the best
+        # solution found so far (at worst the greedy warm start, which is valid).
+        solver = pulp.PULP_CBC_CMD(msg=True, warmStart=True, timeLimit=30)
         prob.solve(solver)
 
         status = pulp.LpStatus[prob.status]
+        # If the time limit hit before any usable values were produced, fall
+        # back to the always-valid greedy labeling.
+        if S.varValue is None or any(f[v].varValue is None for v in nodes):
+            print("  ILP produced no usable solution (time limit); using greedy.",
+                  flush=True)
+            g_lo = min(g_labels.values())
+            labels = {v: x - g_lo for v, x in g_labels.items()}
+            span = g_span - g_lo
+            ordering = sorted(nodes, key=lambda v: (labels[v], v))
+            return ordering, labels, span, "UsedGreedy(timeout)"
         labels = {v: int(round(f[v].varValue)) for v in nodes}
         span = int(round(S.varValue))
         # shift so the smallest label is 0
@@ -668,11 +765,33 @@ class RadioLabelingUI:
         self.last_binding = None
         self.fig.canvas.draw_idle()
 
+        # Exact ILP only scales to small graphs. Beyond this size it would run
+        # for minutes without finishing, so fall back to the strong heuristic
+        # (greedy + local search), which returns a valid bound almost instantly.
+        ILP_MAX = 14
+        if self.delta > ILP_MAX:
+            print("=" * 56)
+            print(f"VERIFY  {self.name_id}  |V|={self.delta} > {ILP_MAX}: "
+                  "graf terlalu besar untuk ILP eksak.", flush=True)
+            print("  memakai heuristik kuat (greedy + local search)...",
+                  flush=True)
+            dist = dict(nx.all_pairs_shortest_path_length(self.G))
+            t0 = time.time()
+            ordering, labels, span = self._best_heuristic(dist)
+            print(f"  best span = {span}  ({time.time() - t0:.2f}s)")
+            print("  [batas atas valid untuk rn; bukan bukti optimal eksak]")
+            print("=" * 56)
+            for v in ordering:
+                fake = type("PickEv", (), {"artist": self.node_patches[v]})()
+                self._on_pick(fake)
+            self.fig.canvas.draw_idle()
+            return
+
         print("=" * 56)
         print(f"VERIFY (ILP)  {self.name_id}  "
               f"|V|={self.delta}  diam={self.diam}", flush=True)
-        print("(this may take a while; the greedy solution will be used as a"
-              " warm start)", flush=True)
+        print("(graf kecil: cari bukti optimal via ILP, batas waktu 30s; "
+              "warm-start dari heuristik)", flush=True)
 
         t0 = time.time()
         try:
@@ -683,7 +802,7 @@ class RadioLabelingUI:
 
         elapsed = time.time() - t0
         print(f"  status: {status}")
-        print(f"  optimal span = {span}  (solved in {elapsed:.2f}s)")
+        print(f"  best span = {span}  (solved in {elapsed:.2f}s)")
         print("=" * 56)
 
         # Replay the labels via _on_pick so visuals/info panel are consistent
@@ -805,6 +924,24 @@ class RadioLabelingUI:
 # Graph specs (one per supported family)
 # ----------------------------------------------------------------------
 
+def _base_diameter(G, base_nodes) -> int:
+    """Diameter measured over ORIGINAL vertices only (thesis convention):
+    the largest shortest-path distance between two non-subdivision vertices.
+    This equals 2 x diam(base graph). For the ladder it coincides with the
+    full graph diameter; for prisms with odd m (e.g. D_{3,n}, D_{5,n}) it is
+    one less than nx.diameter(G), because there a subdivision vertex is the
+    eccentric one — and the document uses this original-vertex value.
+    """
+    base = list(base_nodes)
+    best = 0
+    for u in base:
+        dist = nx.single_source_shortest_path_length(G, u)
+        for v in base:
+            if dist[v] > best:
+                best = dist[v]
+    return best
+
+
 def make_ladder_spec(k: int, n: int) -> dict:
     """SSD_k(L_n): super sub-division of the ladder graph L_n.
 
@@ -818,6 +955,7 @@ def make_ladder_spec(k: int, n: int) -> dict:
         sym_groups.append([f"wb_{i}_{j}" for j in range(1, k + 1)])
     for i in range(1, n + 1):
         sym_groups.append([f"wv_{i}_{j}" for j in range(1, k + 1)])
+    base = [v for v in G if v.startswith("u_") or v.startswith("v_")]
     return {
         "G": G,
         "pos": pos,
@@ -826,6 +964,7 @@ def make_ladder_spec(k: int, n: int) -> dict:
         "savename": f"ssd_{k}_L_{n}_radio.png",
         "sym_groups": sym_groups,
         "family": "ladder",
+        "diam": _base_diameter(G, base),
     }
 
 
@@ -842,6 +981,7 @@ def make_prism_spec(k: int, m: int, n: int) -> dict:
     for i in range(1, n):
         for c in range(1, m + 1):
             sym_groups.append([f"wr_{c}_{i}_{j}" for j in range(1, k + 1)])
+    base = [v for v in G if v.startswith("p_")]
     return {
         "G": G,
         "pos": pos,
@@ -850,6 +990,7 @@ def make_prism_spec(k: int, m: int, n: int) -> dict:
         "savename": f"ssd_{k}_D_{m}_{n}_radio.png",
         "sym_groups": sym_groups,
         "family": "prism",
+        "diam": _base_diameter(G, base),
     }
 
 
