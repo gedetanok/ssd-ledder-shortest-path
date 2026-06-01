@@ -28,6 +28,7 @@ Buttons:
 """
 
 import sys
+import math
 import networkx as nx
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
@@ -113,6 +114,86 @@ def build_ssd_ladder_doc(m: int, n: int):
     return G, pos
 
 
+def build_ssd_prism_doc(k: int, m: int, n: int):
+    """Return (G, pos) for SSD_k(D_{m,n}).
+
+    Base graph D_{m,n} = prism graph C_m □ P_n ("tabung"/stacked-prism):
+      * n layers, each layer is a cycle C_m  (m >= 3),
+      * corresponding vertices of consecutive layers joined by a matching.
+      * D_{4,2} = a cube, D_{5,2} = pentagonal prism, D_{3,n} = triangular
+        prism stack, etc.
+
+    Super-subdivision SSD_k replaces EVERY edge xy of D_{m,n} by K_{2,k}:
+    k new vertices, each adjacent to both x and y (the original edge removed).
+
+    Vertices
+    --------
+      p_{c}_{i}    base vertex, cycle position c = 1..m, layer i = 1..n
+      wc_{c}_{i}_{j}   j-th subdivision (j = 1..k) of the cycle edge
+                       p_{c}_{i} -- p_{c+1}_{i}   (c+1 taken mod m)
+      wr_{c}_{i}_{j}   j-th subdivision of the vertical/rung edge
+                       p_{c}_{i} -- p_{c}_{i+1}   (i = 1..n-1)
+
+    Counts:  |V| = m*n + k*m*(2n-1),   |E| = 2*k*m*(2n-1).
+
+    Layout: each layer is a regular m-gon; successive layers are offset
+    diagonally (oblique projection) so the figure reads as a 3-D prism/tube,
+    matching the SSD_k(D_{m,n}) document figures.
+    """
+    if k < 1 or m < 3 or n < 2:
+        raise ValueError("Need k >= 1, m >= 3 and n >= 2.")
+
+    G = nx.Graph()
+    pos = {}
+
+    R = 2.4              # polygon (cycle) radius
+    SKEW_X = 1.15        # horizontal depth offset per layer (3-D feel)
+    H = 2.7              # vertical offset per layer
+    STEP = 0.42          # fan offset between subdivisions on the same edge
+    theta0 = math.pi / 2 + math.pi / m   # orient polygon with a flat-ish top
+
+    def layer_xy(c, i):
+        ang = theta0 + 2 * math.pi * (c - 1) / m
+        x = R * math.cos(ang) + (i - 1) * SKEW_X
+        y = R * math.sin(ang) + (i - 1) * H
+        return (x, y)
+
+    # base vertices
+    for i in range(1, n + 1):
+        for c in range(1, m + 1):
+            v = f"p_{c}_{i}"
+            G.add_node(v)
+            pos[v] = layer_xy(c, i)
+
+    def add_subs(u, w, tag, c, i):
+        ux, uy = pos[u]
+        wx, wy = pos[w]
+        mx, my = (ux + wx) / 2.0, (uy + wy) / 2.0
+        dx, dy = wx - ux, wy - uy
+        length = math.hypot(dx, dy) or 1.0
+        px, py = -dy / length, dx / length   # unit perpendicular
+        for j in range(1, k + 1):
+            off = (j - (k + 1) / 2.0) * STEP
+            s = f"{tag}_{c}_{i}_{j}"
+            G.add_node(s)
+            pos[s] = (mx + px * off, my + py * off)
+            G.add_edge(u, s)
+            G.add_edge(w, s)
+
+    # cycle edges within each layer  ->  wc subdivisions
+    for i in range(1, n + 1):
+        for c in range(1, m + 1):
+            c_next = c % m + 1
+            add_subs(f"p_{c}_{i}", f"p_{c_next}_{i}", "wc", c, i)
+
+    # vertical matching edges between consecutive layers  ->  wr subdivisions
+    for i in range(1, n):
+        for c in range(1, m + 1):
+            add_subs(f"p_{c}_{i}", f"p_{c}_{i+1}", "wr", c, i)
+
+    return G, pos
+
+
 def pretty(name: str) -> str:
     p = name.split("_")
     if p[0] == "u":
@@ -125,6 +206,13 @@ def pretty(name: str) -> str:
         return f"$w^{{b}}_{{{p[1]},{p[2]}}}$"
     if p[0] == "wv":
         return f"$w^{{v}}_{{{p[1]},{p[2]}}}$"
+    # prism / D_{m,n} vertices
+    if p[0] == "p":
+        return f"$v_{{{p[1]},{p[2]}}}$"
+    if p[0] == "wc":
+        return f"$w^{{c}}_{{{p[1]},{p[2]},{p[3]}}}$"
+    if p[0] == "wr":
+        return f"$w^{{r}}_{{{p[1]},{p[2]},{p[3]}}}$"
     return name
 
 
@@ -135,11 +223,27 @@ def pretty(name: str) -> str:
 class RadioLabelingUI:
     NODE_R = 0.25
 
-    def __init__(self, m: int, n: int):
-        self.m, self.n = m, n
-        self.G, self.pos = build_ssd_ladder_doc(m, n)
+    def __init__(self, spec: dict):
+        # spec describes the chosen graph family in a graph-agnostic way:
+        #   G, pos        : the graph and a layout
+        #   title_math    : mathtext title, e.g. "SSD$_2$(D$_{3,2}$)"
+        #   name_id       : plain console id, e.g. "SSD_2(D_3,2)"
+        #   savename      : default PNG file name
+        #   sym_groups    : lists of interchangeable subdivision vertices (ILP)
+        #   family        : "ladder" or "prism" (drives label placement)
+        self.spec = spec
+        self.G, self.pos = spec["G"], spec["pos"]
+        self.title_math = spec["title_math"]
+        self.name_id = spec["name_id"]
+        self.savename = spec["savename"]
+        self.sym_groups = [g for g in spec.get("sym_groups", []) if len(g) >= 2]
+        self.family = spec.get("family", "ladder")
         self.diam = nx.diameter(self.G)
         self.delta = self.G.number_of_nodes()
+
+        xs = [p[0] for p in self.pos.values()]
+        ys = [p[1] for p in self.pos.values()]
+        self.centroid = (sum(xs) / len(xs), sum(ys) / len(ys))
 
         self.ordering = []
         self.labels = {}
@@ -162,8 +266,8 @@ class RadioLabelingUI:
     def _build_figure(self):
         self.fig = plt.figure(figsize=(15.0, 8.6))
         self.fig.suptitle(
-            f"SSD$_{{{self.m}}}$(L$_{{{self.n}}}$) — Radio Labeling   "
-            f"diameter k = {self.diam}   |V| = {self.delta}",
+            f"{self.title_math} — Radio Labeling   "
+            f"diameter = {self.diam}   |V| = {self.delta}",
             fontsize=13,
         )
 
@@ -252,6 +356,17 @@ class RadioLabelingUI:
 
     def _text_offset(self, name):
         r = self.NODE_R
+        if self.family == "prism":
+            # place each label radially outward from the figure centroid so
+            # neighbouring labels in the dense prism drawing don't collide
+            x, y = self.pos[name]
+            cx, cy = self.centroid
+            dx, dy = x - cx, y - cy
+            length = math.hypot(dx, dy) or 1.0
+            ox, oy = dx / length * (r + 0.18), dy / length * (r + 0.18)
+            ha = "left" if ox >= 0 else "right"
+            va = "bottom" if oy >= 0 else "top"
+            return ox, oy, ha, va
         if name.startswith("u_"):
             return 0, r + 0.14, "center", "bottom"
         if name.startswith("v_"):
@@ -325,7 +440,7 @@ class RadioLabelingUI:
         self.fig.canvas.draw_idle()
 
     def _on_save(self, event):
-        fname = f"ssd_{self.m}_L_{self.n}_radio.png"
+        fname = self.savename
         self.fig.savefig(fname, dpi=140, bbox_inches="tight")
         print(f"saved: {fname}")
 
@@ -422,8 +537,8 @@ class RadioLabelingUI:
         self.fig.canvas.draw_idle()
 
         print("=" * 56)
-        print(f"GREEDY  SSD_{self.m}(L_{self.n})  "
-              f"|V|={self.delta}  k={self.diam}", flush=True)
+        print(f"GREEDY  {self.name_id}  "
+              f"|V|={self.delta}  diam={self.diam}", flush=True)
 
         dist = dict(nx.all_pairs_shortest_path_length(self.G))
         t0 = time.time()
@@ -492,13 +607,9 @@ class RadioLabelingUI:
 
         # Symmetry breaking: subdivisions on the same edge are indistinguishable
         # (each connects to the same pair of endpoints with no other neighbours),
-        # so we can WLOG enforce f(w_{i,1}) < f(w_{i,2}) < ... < f(w_{i,m}).
-        sym_groups = []
-        for i in range(1, self.n):
-            sym_groups.append([f"wh_{i}_{j}" for j in range(1, self.m + 1)])
-            sym_groups.append([f"wb_{i}_{j}" for j in range(1, self.m + 1)])
-        for i in range(1, self.n + 1):
-            sym_groups.append([f"wv_{i}_{j}" for j in range(1, self.m + 1)])
+        # so we can WLOG enforce f(w_1) < f(w_2) < ... < f(w_k) within a group.
+        # The interchangeable groups are provided by the graph spec.
+        sym_groups = self.sym_groups
         for grp in sym_groups:
             for a, b in zip(grp, grp[1:]):
                 # strict ordering (labels are distinct in any valid radio labeling)
@@ -558,8 +669,8 @@ class RadioLabelingUI:
         self.fig.canvas.draw_idle()
 
         print("=" * 56)
-        print(f"VERIFY (ILP)  SSD_{self.m}(L_{self.n})  "
-              f"|V|={self.delta}  k={self.diam}", flush=True)
+        print(f"VERIFY (ILP)  {self.name_id}  "
+              f"|V|={self.delta}  diam={self.diam}", flush=True)
         print("(this may take a while; the greedy solution will be used as a"
               " warm start)", flush=True)
 
@@ -651,7 +762,7 @@ class RadioLabelingUI:
     def _update_info(self):
         k = self.diam
         lines = []
-        lines.append(f"SSD_{self.m}(L_{self.n})  |V|={self.delta}  diam k={k}")
+        lines.append(f"{self.name_id}  |V|={self.delta}  diam k={k}")
         lines.append("")
         lines.append("Syarat radio:  |f(u)-f(v)| >= k+1 - d(u,v)")
         lines.append("(berlaku utk SEMUA pasangan u, v)")
@@ -691,6 +802,58 @@ class RadioLabelingUI:
 
 
 # ----------------------------------------------------------------------
+# Graph specs (one per supported family)
+# ----------------------------------------------------------------------
+
+def make_ladder_spec(k: int, n: int) -> dict:
+    """SSD_k(L_n): super sub-division of the ladder graph L_n.
+
+    Here k = number of subdivisions per edge (the document's lower index),
+    n = number of ladder steps.
+    """
+    G, pos = build_ssd_ladder_doc(k, n)
+    sym_groups = []
+    for i in range(1, n):
+        sym_groups.append([f"wh_{i}_{j}" for j in range(1, k + 1)])
+        sym_groups.append([f"wb_{i}_{j}" for j in range(1, k + 1)])
+    for i in range(1, n + 1):
+        sym_groups.append([f"wv_{i}_{j}" for j in range(1, k + 1)])
+    return {
+        "G": G,
+        "pos": pos,
+        "title_math": f"SSD$_{{{k}}}$(L$_{{{n}}}$)",
+        "name_id": f"SSD_{k}(L_{n})",
+        "savename": f"ssd_{k}_L_{n}_radio.png",
+        "sym_groups": sym_groups,
+        "family": "ladder",
+    }
+
+
+def make_prism_spec(k: int, m: int, n: int) -> dict:
+    """SSD_k(D_{m,n}): super sub-division of the prism graph D_{m,n}=C_m □ P_n.
+
+    k = subdivisions per edge, m = cycle size (>=3), n = number of layers.
+    """
+    G, pos = build_ssd_prism_doc(k, m, n)
+    sym_groups = []
+    for i in range(1, n + 1):
+        for c in range(1, m + 1):
+            sym_groups.append([f"wc_{c}_{i}_{j}" for j in range(1, k + 1)])
+    for i in range(1, n):
+        for c in range(1, m + 1):
+            sym_groups.append([f"wr_{c}_{i}_{j}" for j in range(1, k + 1)])
+    return {
+        "G": G,
+        "pos": pos,
+        "title_math": f"SSD$_{{{k}}}$(D$_{{{m},{n}}}$)",
+        "name_id": f"SSD_{k}(D_{m},{n})",
+        "savename": f"ssd_{k}_D_{m}_{n}_radio.png",
+        "sym_groups": sym_groups,
+        "family": "prism",
+    }
+
+
+# ----------------------------------------------------------------------
 # Entry point
 # ----------------------------------------------------------------------
 
@@ -708,28 +871,59 @@ def ask_int(prompt: str, lo: int) -> int:
         return x
 
 
+def _spec_from_args(args):
+    """Parse CLI args into a spec, or return None to fall back to prompts.
+
+    Accepted forms:
+        python ssd_ladder_ui.py L k n        -> SSD_k(L_n)
+        python ssd_ladder_ui.py D k m n      -> SSD_k(D_{m,n})
+        python ssd_ladder_ui.py k n          -> SSD_k(L_n)   (backward compat)
+    """
+    if not args:
+        return None
+    try:
+        head = args[0].upper()
+        if head == "L" and len(args) == 3:
+            return make_ladder_spec(int(args[1]), int(args[2]))
+        if head == "D" and len(args) == 4:
+            return make_prism_spec(int(args[1]), int(args[2]), int(args[3]))
+        if len(args) == 2:                       # backward compatible "k n"
+            return make_ladder_spec(int(args[0]), int(args[1]))
+    except ValueError:
+        pass
+    print("usage:")
+    print("  python ssd_ladder_ui.py L <k> <n>        # SSD_k(L_n)")
+    print("  python ssd_ladder_ui.py D <k> <m> <n>    # SSD_k(D_{m,n})")
+    sys.exit(2)
+
+
 def main():
-    if len(sys.argv) == 3:
-        try:
-            m, n = int(sys.argv[1]), int(sys.argv[2])
-        except ValueError:
-            print("usage: python ssd_ladder_ui.py [m n]")
-            sys.exit(2)
-        if m < 1 or n < 2:
-            print("Need m >= 1 and n >= 2")
-            sys.exit(2)
-    else:
-        print("=" * 60)
-        print(" SSD_m(L_n) Radio Labeling — interactive UI")
-        print("=" * 60)
-        m = ask_int("m (subdivisions per edge, m >= 1): ", 1)
-        n = ask_int("n (ladder steps, n >= 2): ", 2)
+    spec = _spec_from_args(sys.argv[1:])
 
-    print(f"\nopening UI for SSD_{m}(L_{n}) ...")
-    print("click vertices in the order you want them labeled.")
-    print("(buttons: Undo / Reset / Save PNG)")
+    if spec is None:
+        print("=" * 60)
+        print(" Radio Labeling — interactive UI")
+        print(" Pilih bentuk graf:")
+        print("   1) SSD_k(L_n)     — super sub-divisi graf Tangga (Ladder)")
+        print("   2) SSD_k(D_m,n)   — super sub-divisi graf Prisma/Tabung"
+              "  (C_m x P_n)")
+        print("=" * 60)
+        choice = (input("pilih graf [1/2] (default 1): ").strip() or "1")
+        if choice == "2":
+            k = ask_int("k (subdivisi per rusuk, k >= 1): ", 1)
+            m = ask_int("m (ukuran siklus C_m, m >= 3): ", 3)
+            n = ask_int("n (jumlah lapis, n >= 2): ", 2)
+            spec = make_prism_spec(k, m, n)
+        else:
+            k = ask_int("k (subdivisi per rusuk, k >= 1): ", 1)
+            n = ask_int("n (langkah ladder, n >= 2): ", 2)
+            spec = make_ladder_spec(k, n)
 
-    RadioLabelingUI(m, n)
+    print(f"\nmembuka UI untuk {spec['name_id']} ...")
+    print("klik vertex sesuai urutan pelabelan yang diinginkan.")
+    print("(tombol: Undo / Reset / Optimize / Verify / Save PNG)")
+
+    RadioLabelingUI(spec)
 
 
 if __name__ == "__main__":

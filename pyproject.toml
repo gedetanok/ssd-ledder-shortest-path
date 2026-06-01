@@ -4,6 +4,8 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
     "matplotlib>=3.10.9",
+    "mlx-whisper>=0.4.3",
     "networkx>=3.6.1",
+    "openai>=2.37.0",
     "pulp>=3.3.1",
 ]

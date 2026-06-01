@@ -1,5 +1,7 @@
 """
-SSD_m(L_n) explorer — super-subdivision of a ladder graph.
+SSD explorer — super-subdivision of a ladder graph SSD_k(L_n) OR a prism
+graph SSD_k(D_{m,n}) (D_{m,n}=C_m □ P_n: cube/pentagonal-prism/... stacks).
+The graph family is chosen interactively at startup.
 
 Two modes:
     1) shortest path   — distance d(s, t) between two vertices (BFS).
@@ -26,6 +28,7 @@ Reference:
 """
 
 import re
+import math
 import networkx as nx
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
@@ -97,6 +100,68 @@ def build_ssd_ladder(m: int, n: int):
     return G, pos, role
 
 
+def build_ssd_prism(k: int, m: int, n: int):
+    """Super-subdivision SSD_k(D_{m,n}) of the prism graph D_{m,n}=C_m □ P_n.
+
+    D_{m,n}: n stacked copies of the cycle C_m (m >= 3), corresponding vertices
+    of consecutive copies joined by a matching (D_{4,2}=cube, D_{5,2}=pentagonal
+    prism, ...). SSD_k replaces every edge by K_{2,k}.
+
+    Vertices:
+        p_{c}_{i}      base vertex, cycle position c=1..m, layer i=1..n
+        wc_{c}_{i}_{j} j-th sub of cycle edge p_{c}_{i} -- p_{c+1}_{i} (mod m)
+        wr_{c}_{i}_{j} j-th sub of vertical edge p_{c}_{i} -- p_{c}_{i+1}
+    """
+    if k < 1 or m < 3 or n < 2:
+        raise ValueError("Need k >= 1, m >= 3 and n >= 2.")
+
+    G = nx.Graph()
+    pos, role = {}, {}
+
+    R = 2.4
+    SKEW_X = 1.15
+    H = 2.7
+    STEP = 0.42
+    theta0 = math.pi / 2 + math.pi / m
+
+    def layer_xy(c, i):
+        ang = theta0 + 2 * math.pi * (c - 1) / m
+        return (R * math.cos(ang) + (i - 1) * SKEW_X,
+                R * math.sin(ang) + (i - 1) * H)
+
+    for i in range(1, n + 1):
+        for c in range(1, m + 1):
+            v = f"p_{c}_{i}"
+            G.add_node(v)
+            role[v] = "orig"
+            pos[v] = layer_xy(c, i)
+
+    def add_subs(u, w, tag, c, i):
+        ux, uy = pos[u]
+        wx, wy = pos[w]
+        mx, my = (ux + wx) / 2.0, (uy + wy) / 2.0
+        dx, dy = wx - ux, wy - uy
+        length = math.hypot(dx, dy) or 1.0
+        px, py = -dy / length, dx / length
+        for j in range(1, k + 1):
+            off = (j - (k + 1) / 2.0) * STEP
+            s = f"{tag}_{c}_{i}_{j}"
+            G.add_node(s)
+            role[s] = "sub"
+            pos[s] = (mx + px * off, my + py * off)
+            G.add_edge(u, s)
+            G.add_edge(w, s)
+
+    for i in range(1, n + 1):
+        for c in range(1, m + 1):
+            add_subs(f"p_{c}_{i}", f"p_{c % m + 1}_{i}", "wc", c, i)
+    for i in range(1, n):
+        for c in range(1, m + 1):
+            add_subs(f"p_{c}_{i}", f"p_{c}_{i+1}", "wr", c, i)
+
+    return G, pos, role
+
+
 # ----------------------------------------------------------------------
 # Vertex naming helpers
 # ----------------------------------------------------------------------
@@ -114,6 +179,12 @@ def pretty(name: str) -> str:
         return f"$w^{{b}}_{{{p[1]},{p[2]}}}$"
     if p[0] == "wv":
         return f"$w^{{v}}_{{{p[1]},{p[2]}}}$"
+    if p[0] == "p":
+        return f"$v_{{{p[1]},{p[2]}}}$"
+    if p[0] == "wc":
+        return f"$w^{{c}}_{{{p[1]},{p[2]},{p[3]}}}$"
+    if p[0] == "wr":
+        return f"$w^{{r}}_{{{p[1]},{p[2]},{p[3]}}}$"
     return name
 
 
@@ -124,8 +195,8 @@ def parse_vertex(text: str) -> str:
               wv_2_1   wv2_1   w^v_{2,1}
     """
     s = text.strip().lower()
-    # collapse "w^h" / "w h" patterns into single token "wh", "wb", "wv"
-    s = re.sub(r"w\s*\^?\s*([hbv])", r"w\1", s)
+    # collapse "w^h" / "w h" patterns into single token "wh","wb","wv","wc","wr"
+    s = re.sub(r"w\s*\^?\s*([hbvcr])", r"w\1", s)
     parts = re.findall(r"[a-z]+|\d+", s)
     if not parts:
         raise ValueError(f"could not parse vertex name from {text!r}")
@@ -136,13 +207,23 @@ def parse_vertex(text: str) -> str:
 # Shortest-path visualization (mode 1)
 # ----------------------------------------------------------------------
 
-def visualize_path(G, pos, role, source, target, m, n):
+def _figsize_from_pos(pos, base=11.0, scale=0.42, cap=22.0):
+    """Figure size derived from the layout's bounding box (family-agnostic)."""
+    xs = [p[0] for p in pos.values()]
+    ys = [p[1] for p in pos.values()]
+    w = (max(xs) - min(xs)) or 1.0
+    h = (max(ys) - min(ys)) or 1.0
+    fw = min(cap, max(base, w * scale + 2.0))
+    fh = min(cap, max(7.0, h * scale + 2.0))
+    return fw, fh
+
+
+def visualize_path(G, pos, role, source, target, gid):
     path = nx.shortest_path(G, source, target)
     dist = len(path) - 1
     path_edges = list(zip(path, path[1:]))
 
-    fig_w = max(11.0, 2.6 * n + 1.0 * m)
-    fig, ax = plt.subplots(figsize=(fig_w, 7.5))
+    fig, ax = plt.subplots(figsize=_figsize_from_pos(pos))
 
     nx.draw_networkx_edges(G, pos, ax=ax,
                            edge_color="#cfd8dc", width=0.9, alpha=0.7)
@@ -178,7 +259,7 @@ def visualize_path(G, pos, role, source, target, m, n):
         labels[v] = pretty(v)
     nx.draw_networkx_labels(G, pos, labels=labels, ax=ax, font_size=9)
 
-    title = (f"SSD$_{{{m}}}$(L$_{{{n}}}$)   "
+    title = (f"{gid}   "
              f"shortest path  {pretty(source)} $\\to$ {pretty(target)}   "
              f"d = {dist}")
     ax.set_title(title, fontsize=13, pad=12)
@@ -246,15 +327,18 @@ def _label_offset(name):
         return 14, 0, "left", "center"
     if name.startswith("wv"):
         return 12, 0, "left", "center"
+    # prism / D_{m,n} vertices
+    if name.startswith("p_"):
+        return 0, 16, "center", "bottom"
+    if name.startswith("wc") or name.startswith("wr"):
+        return 11, 0, "left", "center"
     return 0, 14, "center", "bottom"
 
 
-def visualize_labeling(G, pos, role, labels, ordering, d, m, n, violations):
+def visualize_labeling(G, pos, role, labels, ordering, d, gid, violations):
     span = max(labels.values())
 
-    fig_w = max(13.0, 3.0 * n + 1.4 * m)
-    fig_h = max(7.5, 3.5 + 1.0 * m)
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    fig, ax = plt.subplots(figsize=_figsize_from_pos(pos, base=13.0))
 
     nx.draw_networkx_edges(G, pos, ax=ax,
                            edge_color="#b0bec5", width=1.0, alpha=0.8)
@@ -298,7 +382,7 @@ def visualize_labeling(G, pos, role, labels, ordering, d, m, n, violations):
 
     status = "valid radio labeling ✓" if not violations \
         else f"{len(violations)} radio violation(s) ✗"
-    title = (f"SSD$_{{{m}}}$(L$_{{{n}}}$) radio labeling   "
+    title = (f"{gid} radio labeling   "
              f"d = {d}   span = {span}   {status}")
     ax.set_title(title, fontsize=13, pad=12)
 
@@ -331,6 +415,17 @@ Accepted input forms:  u_1   u1   wh_1_2   w^h_{1,2}   wv 2 1
 """
 
 
+HELP_NAMING_PRISM = """
+Vertex name format (D_{m,n} = prism C_m x P_n)
+----------------------------------------------
+  p_c_i      base vertex: cycle position c in {1..m}, layer i in {1..n}
+  wc_c_i_j   j-th sub on cycle edge p_c_i -- p_(c+1)_i,  j in {1..k}
+  wr_c_i_j   j-th sub on vertical edge p_c_i -- p_c_(i+1), i in {1..n-1}
+
+Accepted input forms:  p_1_2   p 1 2   wc_1_1_1   w^c_{1,1,1}   wr 2 1 1
+"""
+
+
 def ask_int(prompt: str, lo: int) -> int:
     while True:
         raw = input(prompt).strip()
@@ -346,7 +441,7 @@ def ask_int(prompt: str, lo: int) -> int:
 
 
 def list_vertices(m, n):
-    """Print vertex names grouped by type, in a stable order."""
+    """Print ladder vertex names grouped by type, in a stable order."""
     orig_top = [f"u_{i}" for i in range(1, n + 1)]
     orig_bot = [f"v_{i}" for i in range(1, n + 1)]
     wh = [f"wh_{i}_{j}" for i in range(1, n) for j in range(1, m + 1)]
@@ -360,6 +455,20 @@ def list_vertices(m, n):
     if wb:
         print("  bot subs   :", "  ".join(wb))
     print("  rung subs  :", "  ".join(wv))
+
+
+def list_vertices_prism(k, m, n):
+    """Print prism D_{m,n} vertex names grouped by type."""
+    base = [f"p_{c}_{i}" for i in range(1, n + 1) for c in range(1, m + 1)]
+    wc = [f"wc_{c}_{i}_{j}" for i in range(1, n + 1)
+          for c in range(1, m + 1) for j in range(1, k + 1)]
+    wr = [f"wr_{c}_{i}_{j}" for i in range(1, n)
+          for c in range(1, m + 1) for j in range(1, k + 1)]
+    print("Vertices:")
+    print("  base       :", "  ".join(base))
+    print("  cycle subs :", "  ".join(wc))
+    if wr:
+        print("  rung subs  :", "  ".join(wr))
 
 
 def ask_vertex(G, prompt):
@@ -379,7 +488,9 @@ def ask_vertex(G, prompt):
         return name
 
 
-def ask_ordering(G, m, n):
+def ask_ordering(spec):
+    G = spec["G"]
+    list_fn = spec["list_fn"]
     delta = G.number_of_nodes()
     print(f"\nEnter the ordering μ_1, μ_2, …, μ_{delta} of all {delta} vertices.")
     print("Separate names with commas or whitespace. Type 'list' to see all vertex")
@@ -388,7 +499,7 @@ def ask_ordering(G, m, n):
     while True:
         raw = input("ordering: ").strip()
         if raw.lower() == "list":
-            list_vertices(m, n)
+            list_fn()
             continue
         if raw.lower() == "auto":
             order = greedy_ordering(G)
@@ -429,9 +540,11 @@ def ask_ordering(G, m, n):
 
 def greedy_ordering(G):
     """Heuristic seed: at each step pick a not-yet-placed vertex farthest from the previous."""
-    start = next(iter(G.nodes))  # any vertex; tweak if you want to start from u_1
+    start = next(iter(G.nodes))  # any vertex; tweak if you want to start elsewhere
     if "u_1" in G:
         start = "u_1"
+    elif "p_1_1" in G:
+        start = "p_1_1"
     placed = [start]
     remaining = set(G.nodes) - {start}
     while remaining:
@@ -448,24 +561,48 @@ def greedy_ordering(G):
 # Main
 # ----------------------------------------------------------------------
 
-def run_shortest_path(G, pos, role, m, n):
-    print(HELP_NAMING)
-    list_vertices(m, n)
+def make_ladder_spec_cli(k, n):
+    G, pos, role = build_ssd_ladder(k, n)
+    return {
+        "G": G, "pos": pos, "role": role,
+        "gid": f"SSD$_{{{k}}}$(L$_{{{n}}}$)",
+        "name_id": f"SSD_{k}(L_{n})",
+        "help": HELP_NAMING,
+        "list_fn": lambda: list_vertices(k, n),
+    }
+
+
+def make_prism_spec_cli(k, m, n):
+    G, pos, role = build_ssd_prism(k, m, n)
+    return {
+        "G": G, "pos": pos, "role": role,
+        "gid": f"SSD$_{{{k}}}$(D$_{{{m},{n}}}$)",
+        "name_id": f"SSD_{k}(D_{m},{n})",
+        "help": HELP_NAMING_PRISM,
+        "list_fn": lambda: list_vertices_prism(k, m, n),
+    }
+
+
+def run_shortest_path(spec):
+    G, pos, role = spec["G"], spec["pos"], spec["role"]
+    print(spec["help"])
+    spec["list_fn"]()
     print()
     src = ask_vertex(G, "source vertex: ")
     tgt = ask_vertex(G, "target vertex: ")
-    path, dist = visualize_path(G, pos, role, src, tgt, m, n)
+    path, dist = visualize_path(G, pos, role, src, tgt, spec["gid"])
     print(f"\nshortest distance d({src}, {tgt}) = {dist}")
     print("path:", " -> ".join(path))
 
 
-def run_radio_labeling(G, pos, role, m, n):
+def run_radio_labeling(spec):
+    G, pos, role = spec["G"], spec["pos"], spec["role"]
     d = nx.diameter(G)
     print(f"\ndiameter d = {d}")
-    print(HELP_NAMING)
-    list_vertices(m, n)
+    print(spec["help"])
+    spec["list_fn"]()
 
-    ordering = ask_ordering(G, m, n)
+    ordering = ask_ordering(spec)
     labels = radio_labeling(G, ordering, d)
     span = max(labels.values())
     violations = verify_radio(G, labels, d)
@@ -480,31 +617,44 @@ def run_radio_labeling(G, pos, role, m, n):
         for u, v, actual, need, dist in violations[:10]:
             print(f"  ({u}, {v}): |dφ| = {actual} < required {need}  (dist = {dist})")
     else:
-        print("→ valid radio labeling: span is an upper bound for rn(SSD_m(L_n))")
+        print(f"→ valid radio labeling: span is an upper bound "
+              f"for rn({spec['name_id']})")
 
-    visualize_labeling(G, pos, role, labels, ordering, d, m, n, violations)
+    visualize_labeling(G, pos, role, labels, ordering, d, spec["gid"], violations)
 
 
 def main():
     print("=" * 66)
-    print(" SSD_m(L_n) explorer — shortest path & radio labeling")
+    print(" SSD explorer — shortest path & radio labeling")
     print("=" * 66)
+    print("\nPilih bentuk graf:")
+    print("  1) SSD_k(L_n)    — super sub-divisi graf Tangga (Ladder)")
+    print("  2) SSD_k(D_m,n)  — super sub-divisi graf Prisma/Tabung (C_m x P_n)")
+    gchoice = (input("pilih graf [1/2] (default 1): ").strip() or "1")
 
     print("\nMode:")
     print("  1) shortest path between two vertices")
     print("  2) radio labeling with user-supplied vertex ordering")
     mode = (input("choose [1/2] (default 2): ").strip() or "2")
 
-    m = ask_int("m (subdivisions per edge, m >= 1): ", 1)
-    n = ask_int("n (ladder steps, n >= 2): ", 2)
+    if gchoice == "2":
+        k = ask_int("k (subdivisi per rusuk, k >= 1): ", 1)
+        m = ask_int("m (ukuran siklus C_m, m >= 3): ", 3)
+        n = ask_int("n (jumlah lapis, n >= 2): ", 2)
+        spec = make_prism_spec_cli(k, m, n)
+    else:
+        k = ask_int("k (subdivisi per rusuk, k >= 1): ", 1)
+        n = ask_int("n (langkah ladder, n >= 2): ", 2)
+        spec = make_ladder_spec_cli(k, n)
 
-    G, pos, role = build_ssd_ladder(m, n)
-    print(f"\n|V| = {G.number_of_nodes()},  |E| = {G.number_of_edges()}")
+    G = spec["G"]
+    print(f"\n{spec['name_id']}:  |V| = {G.number_of_nodes()},  "
+          f"|E| = {G.number_of_edges()}")
 
     if mode == "1":
-        run_shortest_path(G, pos, role, m, n)
+        run_shortest_path(spec)
     else:
-        run_radio_labeling(G, pos, role, m, n)
+        run_radio_labeling(spec)
 
 
 if __name__ == "__main__":
