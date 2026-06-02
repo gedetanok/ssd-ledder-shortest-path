@@ -263,6 +263,7 @@ class RadioLabelingUI:
         self.labels = {}
         self.violations = []
         self.last_binding = None
+        self._pan = None          # active right-drag pan state, or None
 
         self.node_patches = {}    # vertex -> Circle
         self.name_artists = {}    # vertex -> Text (vertex name, outside node)
@@ -321,8 +322,9 @@ class RadioLabelingUI:
         # short instruction line above the graph
         self.fig.text(
             0.35, 0.95,
-            "Click vertices in the order you want them labeled.",
-            ha="center", fontsize=10, color="#37474f",
+            "Klik titik utk melabeli  •  scroll = zoom  •  drag klik-kanan = geser"
+            "  •  'r' = reset tampilan",
+            ha="center", fontsize=9.5, color="#37474f",
         )
 
     def _draw_static(self):
@@ -367,6 +369,9 @@ class RadioLabelingUI:
         my = (max(ys) - min(ys)) * 0.14 + 0.7
         self.ax.set_xlim(min(xs) - mx, max(xs) + mx)
         self.ax.set_ylim(min(ys) - my, max(ys) + my)
+        # remember the full ("home") view so 'r' can restore it after zoom/pan
+        self._home_xlim = self.ax.get_xlim()
+        self._home_ylim = self.ax.get_ylim()
 
     def _text_offset(self, name):
         r = self.NODE_R
@@ -399,6 +404,59 @@ class RadioLabelingUI:
 
     def _connect_events(self):
         self.fig.canvas.mpl_connect("pick_event", self._on_pick)
+        # zoom / pan / reset-view interactions
+        self.fig.canvas.mpl_connect("scroll_event", self._on_scroll)
+        self.fig.canvas.mpl_connect("button_press_event", self._on_pan_press)
+        self.fig.canvas.mpl_connect("motion_notify_event", self._on_pan_motion)
+        self.fig.canvas.mpl_connect("button_release_event", self._on_pan_release)
+        self.fig.canvas.mpl_connect("key_press_event", self._on_key)
+
+    # ---------- zoom / pan ----------
+
+    def _on_scroll(self, event):
+        """Mouse-wheel / two-finger scroll zooms in/out, centred on the cursor."""
+        if event.inaxes is not self.ax:
+            return
+        x, y = event.xdata, event.ydata
+        if x is None or y is None:
+            return
+        scale = 0.83 if event.button == "up" else 1.20   # up = zoom in
+        x0, x1 = self.ax.get_xlim()
+        y0, y1 = self.ax.get_ylim()
+        new_w = (x1 - x0) * scale
+        new_h = (y1 - y0) * scale
+        relx = (x - x0) / (x1 - x0)
+        rely = (y - y0) / (y1 - y0)
+        self.ax.set_xlim(x - new_w * relx, x + new_w * (1 - relx))
+        self.ax.set_ylim(y - new_h * rely, y + new_h * (1 - rely))
+        self.fig.canvas.draw_idle()
+
+    def _on_pan_press(self, event):
+        """Right-button drag pans the view (left button stays free for picking)."""
+        if event.button == 3 and event.inaxes is self.ax:
+            self._pan = (event.x, event.y,
+                         self.ax.get_xlim(), self.ax.get_ylim())
+
+    def _on_pan_motion(self, event):
+        if self._pan is None or event.x is None or event.y is None:
+            return
+        px, py, (x0, x1), (y0, y1) = self._pan
+        box = self.ax.get_window_extent()
+        dx = (event.x - px) / box.width * (x1 - x0)
+        dy = (event.y - py) / box.height * (y1 - y0)
+        self.ax.set_xlim(x0 - dx, x1 - dx)
+        self.ax.set_ylim(y0 - dy, y1 - dy)
+        self.fig.canvas.draw_idle()
+
+    def _on_pan_release(self, event):
+        self._pan = None
+
+    def _on_key(self, event):
+        """Press 'r' to reset the zoom/pan back to the full graph."""
+        if event.key in ("r", "R"):
+            self.ax.set_xlim(self._home_xlim)
+            self.ax.set_ylim(self._home_ylim)
+            self.fig.canvas.draw_idle()
 
     def _on_pick(self, event):
         if not isinstance(event.artist, mpatches.Circle):
