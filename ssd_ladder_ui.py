@@ -264,6 +264,8 @@ class RadioLabelingUI:
         self.violations = []
         self.last_binding = None
         self._pan = None          # active right-drag pan state, or None
+        self._info_offset = 0     # scroll position of the right info panel
+        self._info_lines = []     # all lines of the info panel (for scrolling)
 
         self.node_patches = {}    # vertex -> Circle
         self.name_artists = {}    # vertex -> Text (vertex name, outside node)
@@ -312,6 +314,17 @@ class RadioLabelingUI:
         self.btn_ilp.on_clicked(self._on_optimize)   # ILP verify
         self.btn_save.on_clicked(self._on_save)
 
+        # zoom controls in the graph's top-left corner (like a map app)
+        ax_zin = self.fig.add_axes([0.035, 0.855, 0.032, 0.045])
+        ax_zout = self.fig.add_axes([0.035, 0.805, 0.032, 0.045])
+        ax_fit = self.fig.add_axes([0.035, 0.755, 0.050, 0.045])
+        self.btn_zin = Button(ax_zin, "+")
+        self.btn_zout = Button(ax_zout, "−")     # minus sign
+        self.btn_fit = Button(ax_fit, "Fit")
+        self.btn_zin.on_clicked(self._on_zoom_in)
+        self.btn_zout.on_clicked(self._on_zoom_out)
+        self.btn_fit.on_clicked(self._on_fit)
+
         # status text inside the info panel
         self.info_text = self.ax_info.text(
             0.0, 1.0, "", ha="left", va="top",
@@ -319,12 +332,17 @@ class RadioLabelingUI:
             transform=self.ax_info.transAxes,
         )
 
-        # short instruction line above the graph
+        # short instruction line above the graph (kept below the suptitle)
         self.fig.text(
-            0.35, 0.95,
-            "Klik titik utk melabeli  •  scroll = zoom  •  drag klik-kanan = geser"
-            "  •  'r' = reset tampilan",
+            0.35, 0.915,
+            "Klik titik utk melabeli  •  tombol +/−/Fit atau scroll = zoom  •  "
+            "drag klik-kanan = geser",
             ha="center", fontsize=9.5, color="#37474f",
+        )
+        self.fig.text(
+            0.84, 0.93,
+            "(scroll di panel ini utk gulir daftar)",
+            ha="center", fontsize=8.5, color="#90a4ae",
         )
 
     def _draw_static(self):
@@ -414,7 +432,12 @@ class RadioLabelingUI:
     # ---------- zoom / pan ----------
 
     def _on_scroll(self, event):
-        """Mouse-wheel / two-finger scroll zooms in/out, centred on the cursor."""
+        """Scroll over the graph zooms; scroll over the right panel scrolls it."""
+        if event.inaxes is self.ax_info:
+            if self._info_lines:
+                self._info_offset += -3 if event.button == "up" else 3
+                self._render_info()
+            return
         if event.inaxes is not self.ax:
             return
         x, y = event.xdata, event.ydata
@@ -454,9 +477,29 @@ class RadioLabelingUI:
     def _on_key(self, event):
         """Press 'r' to reset the zoom/pan back to the full graph."""
         if event.key in ("r", "R"):
-            self.ax.set_xlim(self._home_xlim)
-            self.ax.set_ylim(self._home_ylim)
-            self.fig.canvas.draw_idle()
+            self._on_fit(None)
+
+    def _zoom(self, factor):
+        """Zoom the graph view about its centre (factor<1 = in, >1 = out)."""
+        x0, x1 = self.ax.get_xlim()
+        y0, y1 = self.ax.get_ylim()
+        cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+        w = (x1 - x0) * factor / 2.0
+        h = (y1 - y0) * factor / 2.0
+        self.ax.set_xlim(cx - w, cx + w)
+        self.ax.set_ylim(cy - h, cy + h)
+        self.fig.canvas.draw_idle()
+
+    def _on_zoom_in(self, event):
+        self._zoom(0.8)
+
+    def _on_zoom_out(self, event):
+        self._zoom(1.25)
+
+    def _on_fit(self, event):
+        self.ax.set_xlim(self._home_xlim)
+        self.ax.set_ylim(self._home_ylim)
+        self.fig.canvas.draw_idle()
 
     def _on_pick(self, event):
         if not isinstance(event.artist, mpatches.Circle):
@@ -938,44 +981,70 @@ class RadioLabelingUI:
 
     def _update_info(self):
         k = self.diam
+        span = max(self.labels.values()) if self.labels else None
         lines = []
-        lines.append(f"{self.name_id}  |V|={self.delta}  diam k={k}")
+        lines.append(f"{self.name_id}")
+        lines.append(f"|V| = {self.delta}    diam k = {k}")
+        lines.append(f"clicked {len(self.ordering)}/{self.delta}"
+                     f"    span = {span if span is not None else '—'}")
+        if self.violations:
+            lines.append(f"⚠ {len(self.violations)} pelanggaran")
         lines.append("")
-        lines.append("Syarat radio:  |f(u)-f(v)| >= k+1 - d(u,v)")
-        lines.append("(berlaku utk SEMUA pasangan u, v)")
-        lines.append("")
-        lines.append(" d(u,v) | min |f(u)-f(v)|")
-        lines.append(" -------+----------------")
-        for d in range(1, k + 1):
-            lines.append(f"   {d:2d}   |       {k + 1 - d}")
-        lines.append("")
-        lines.append(f"clicked : {len(self.ordering)} / {self.delta}")
-        if self.labels:
-            span = max(self.labels.values())
-            lines.append(f"span    = {span}")
-        else:
-            lines.append("span    = —")
+        lines.append("Syarat: |f(u)-f(v)| >= k+1-d(u,v)")
+        lines.append("min |Δf| per jarak d:")
+        pairs = [f"d{d}={k + 1 - d}" for d in range(1, k + 1)]
+        for i in range(0, len(pairs), 4):
+            lines.append("  " + "  ".join(pairs[i:i + 4]))
 
         if self.last_binding is not None and self.ordering:
             v = self.ordering[-1]
             w, dist, need = self.last_binding
             lines.append("")
-            lines.append(f"last: {v} -> f={self.labels[v]}")
-            lines.append(f"  bound by {w} (f={self.labels[w]}):")
-            lines.append(f"  d({w},{v})={dist}, need={need}")
-
-        lines.append("")
-        lines.append("ordering / labels:")
-        for v in self.ordering:
-            lines.append(f"  {v:10s} : {self.labels[v]}")
+            lines.append(f"terakhir: {v} -> f={self.labels[v]}")
+            lines.append(f"  dibatasi {w} (f={self.labels[w]})")
+            lines.append(f"  d({w},{v})={dist}, butuh {need}")
 
         if len(self.ordering) == self.delta:
             lines.append("")
-            lines.append("✓ VALID radio labeling")
-            lines.append(f"  span = {max(self.labels.values())}")
-            lines.append("  (upper bound for rn)")
+            if self.violations:
+                lines.append(f"✗ {len(self.violations)} pelanggaran")
+            else:
+                lines.append("✓ VALID radio labeling")
+                lines.append(f"  span = {span}  (batas atas rn)")
 
-        self.info_text.set_text("\n".join(lines))
+        lines.append("")
+        lines.append(f"urutan / label ({len(self.ordering)}):")
+        for i, v in enumerate(self.ordering, 1):
+            lines.append(f"  {i:2d}. {v:9s}= {self.labels[v]}")
+
+        self._info_lines = lines
+        self._render_info()
+
+    def _render_info(self):
+        """Render the info panel, showing a scrollable window of lines when the
+        content is taller than the panel (scroll the wheel over the panel)."""
+        lines = self._info_lines
+        n = len(lines)
+        try:
+            h_px = self.ax_info.get_window_extent().height
+            line_px = 9 * 1.5 * self.fig.dpi / 72.0
+            visible = max(8, int(h_px / line_px))
+        except Exception:
+            visible = 34
+
+        if n <= visible:
+            self._info_offset = 0
+            shown = lines
+        else:
+            avail = max(4, visible - 2)        # reserve 2 lines for arrows
+            off = max(0, min(self._info_offset, n - avail))
+            self._info_offset = off
+            head = "  ↑↑ scroll ke atas" if off > 0 else ""
+            tail = "  ↓↓ scroll ke bawah" if off + avail < n else ""
+            shown = [head] + lines[off:off + avail] + [tail]
+
+        self.info_text.set_text("\n".join(shown))
+        self.fig.canvas.draw_idle()
 
 
 # ----------------------------------------------------------------------
