@@ -1052,21 +1052,17 @@ class RadioLabelingUI:
 # ----------------------------------------------------------------------
 
 def _base_diameter(G, base_nodes) -> int:
-    """Diameter measured over ORIGINAL vertices only (thesis convention):
-    the largest shortest-path distance between two non-subdivision vertices.
-    This equals 2 x diam(base graph). For the ladder it coincides with the
-    full graph diameter; for prisms with odd m (e.g. D_{3,n}, D_{5,n}) it is
-    one less than nx.diameter(G), because there a subdivision vertex is the
-    eccentric one — and the document uses this original-vertex value.
+    """The TRUE graph diameter (max shortest-path distance over ALL vertices).
+
+    This is the value the radio-labeling condition requires: with k = diam(G),
+    the farthest pair (distance = diam) needs |f(u) - f(v)| >= 1, i.e. every
+    label is distinct. Using a smaller "original-vertices-only" diameter let
+    far-apart subdivision vertices share a label (e.g. two 0s in SSD_1(D_3,2)),
+    which is NOT a valid radio labeling — so we use nx.diameter(G).
+
+    (base_nodes is accepted but unused, kept for call-site compatibility.)
     """
-    base = list(base_nodes)
-    best = 0
-    for u in base:
-        dist = nx.single_source_shortest_path_length(G, u)
-        for v in base:
-            if dist[v] > best:
-                best = dist[v]
-    return best
+    return nx.diameter(G)
 
 
 def make_ladder_spec(k: int, n: int) -> dict:

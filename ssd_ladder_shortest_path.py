@@ -574,20 +574,16 @@ def greedy_ordering(G):
 # ----------------------------------------------------------------------
 
 def _base_diameter(G, role) -> int:
-    """Diameter over ORIGINAL vertices only (thesis convention): the largest
-    shortest-path distance between two non-subdivision vertices (= 2 x diam of
-    the base graph). For prisms with odd m this is one less than nx.diameter(G)
-    because there a subdivision vertex is the eccentric one; the document uses
-    this original-vertex value.
+    """The TRUE graph diameter (max shortest-path distance over ALL vertices).
+
+    Required by the radio-labeling condition: with k = diam(G), the farthest
+    pair needs |f(u) - f(v)| >= 1, so every label is distinct. A smaller
+    original-vertices-only diameter would let far subdivision vertices share a
+    label (an invalid radio labeling), so we use nx.diameter(G).
+
+    (role is accepted but unused, kept for call-site compatibility.)
     """
-    base = [v for v in G if role[v] == "orig"]
-    best = 0
-    for u in base:
-        dist = nx.single_source_shortest_path_length(G, u)
-        for v in base:
-            if dist[v] > best:
-                best = dist[v]
-    return best
+    return nx.diameter(G)
 
 
 def make_ladder_spec_cli(k, n):
